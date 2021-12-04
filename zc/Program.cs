@@ -15,13 +15,29 @@ namespace zc
                 if (string.IsNullOrWhiteSpace(line))
                     return;
 
-                var parse = new Parser(line);
-                var expression = parse.Parse();
+                var parser = new Parser(line);
+                var syntaxTree = parser.Parse();
 
                 var color = Console.ForegroundColor;
                 Console.ForegroundColor = ConsoleColor.DarkGray;
-                PrettyPrint(expression);
+                PrettyPrint(syntaxTree.Root);
                 Console.ForegroundColor = color;
+
+                if (!syntaxTree.Diagnostics.Any())
+                {
+                    var e = new Evaluator(syntaxTree.Root);
+                    var result = e.Evaluate();
+                    Console.WriteLine(result);
+                }
+                else
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+
+                    foreach (var diagonstic in syntaxTree.Diagnostics)
+                        Console.WriteLine(diagonstic);
+
+                    Console.ForegroundColor = color;
+                }
             }
         }
 
@@ -92,15 +108,14 @@ namespace zc
     {
         private readonly string _text;
         private int _position;
+        private List<string> _diagnostics = new List<string>();
+
         public Lexer(string text)
         {
             _text = text;
         }
 
-        private void Next()
-        {
-            _position++;
-        }
+        public IEnumerable<string> Diagnostics => _diagnostics;
 
         private char Current
         {
@@ -111,6 +126,11 @@ namespace zc
                 
                 return _text[_position];
             }
+        }
+
+        private void Next()
+        {
+            _position++;
         }
 
         public SyntaxToken NextToken()
@@ -131,7 +151,9 @@ namespace zc
                 
                 var length = _position - start;
                 var text = _text.Substring(start, length);
-                int.TryParse(text, out var value);
+                if (!int.TryParse(text, out var value))
+                    _diagnostics.Add($"This number {text} isn't valid Int32.");
+
                 return new SyntaxToken(SyntaxKind.NumberToken, start, text, value);
             }
 
@@ -160,6 +182,7 @@ namespace zc
             else if (Current == ')')
                 return new SyntaxToken(SyntaxKind.CloseParanthesisToken, _position++, ")", null);
 
+            _diagnostics.Add($"ERROR: bad character input: '{Current}'");
             return new SyntaxToken(SyntaxKind.BadToken, _position++, _text.Substring(_position - 1, 1), null);
         }
     }
@@ -214,9 +237,25 @@ namespace zc
         }
     }
 
+    sealed class SyntaxTree
+    {
+        public SyntaxTree(IEnumerable<string> diagnostics, ExpressionSyntax root, SyntaxToken endOfFileToken)
+        {
+            Diagnostics = diagnostics.ToArray();
+            Root = root;
+            EndOfFileToken = endOfFileToken;
+        }
+
+        public IReadOnlyList<string> Diagnostics { get; }
+        public ExpressionSyntax Root { get; }
+        public SyntaxToken EndOfFileToken { get; }
+    }
+
     class Parser
     {
         private readonly SyntaxToken[] _tokens;
+
+        private List<string> _diagnostics = new List<string>();
         private int _position;
 
         public Parser(String text)
@@ -236,7 +275,10 @@ namespace zc
             } while (token.Kind != SyntaxKind.EndOfFileToken);
 
             _tokens = tokens.ToArray();
+            _diagnostics.AddRange(lexer.Diagnostics);
         }
+
+        public IEnumerable<string> Diagnostics => _diagnostics;
 
         private SyntaxToken Peek(int offset)
         {
@@ -261,15 +303,25 @@ namespace zc
             if (Current.Kind == kind)
                 return NextToken();
 
+            _diagnostics.Add($"ERROR: Unexpected Token <{Current.Kind}>, extepted <{kind}>");
             return new SyntaxToken(kind, Current.Position, null, null);
         }
 
-        public ExpressionSyntax Parse()
+        public SyntaxTree Parse()
+        {
+            var expression = ParseExpression();
+            var endOfFileToken = Match(SyntaxKind.EndOfFileToken);
+            return new SyntaxTree(_diagnostics, expression, endOfFileToken);
+        }
+
+        private ExpressionSyntax ParseExpression()
         {
             var left = ParsePrimaryExpression();
 
             while (Current.Kind == SyntaxKind.PlusToken ||
-                    Current.Kind == SyntaxKind.MinusToken)
+                    Current.Kind == SyntaxKind.MinusToken ||
+                    Current.Kind == SyntaxKind.StarToken ||
+                    Current.Kind == SyntaxKind.SlashToken)
             {
                 var operatorToken = NextToken();
                 var right = ParsePrimaryExpression();
@@ -296,6 +348,46 @@ namespace zc
         public override int GetHashCode()
         {
             return HashCode.Combine(_tokens, _position, Current);
+        }
+    }
+
+    class Evaluator
+    {
+        private readonly ExpressionSyntax _root;
+
+        public Evaluator(ExpressionSyntax root)
+        {
+            _root = root;
+        }
+
+        public int Evaluate()
+        {
+            return EvaluateExpression(_root);
+        }
+
+        private int EvaluateExpression(ExpressionSyntax node)
+        {
+            if (node is NumberExpressionSyntax n)
+                return (int) n.NumberToken.Value;
+
+            if (node is BinaryExpressionSyntax b)
+            {
+                var left = EvaluateExpression(b.Left);
+                var right = EvaluateExpression(b.Right);
+
+                if (b.OperatorToken.Kind == SyntaxKind.PlusToken)
+                    return left + right;
+                else if (b.OperatorToken.Kind == SyntaxKind.MinusToken)
+                    return left - right;
+                else if (b.OperatorToken.Kind == SyntaxKind.StarToken)
+                    return left * right;
+                else if (b.OperatorToken.Kind == SyntaxKind.SlashToken)
+                    return left / right;
+                else
+                    throw new Exception($"Unexpected binary operator {b.OperatorToken.Kind}");
+            }
+
+                throw new Exception($"Unexpected node {node.Kind}");
         }
     }
 }
